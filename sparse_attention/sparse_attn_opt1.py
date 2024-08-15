@@ -339,7 +339,7 @@ for mode in ["fwd"]:
                 (["Flash-2"] if HAS_FLASH else []),
                 styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                 ylabel="ms",
-                plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
+                plot_name=f"sparse-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
                 args={
                     "H": N_HEADS,
                     "BATCH": BATCH,
