@@ -147,7 +147,7 @@ configs.append(
     styles=[('blue', '-'), ('green', '-')],  # Line styles.
     ylabel='ms',  # Label name for the y-axis.
     plot_name=f'batch matmul',  # Name for the plot. Used also as a file name for saving the plot.
-    args={"M":512, "K":128, "H":32},  # Values for function arguments not in `x_names` and `y_name`.
+    args={"M":256, "K":128, "H":32},  # Values for function arguments not in `x_names` and `y_name`.
 ))
     
 
