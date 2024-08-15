@@ -1,2 +1,2 @@
-# Sparse_Atten_Kernel
+# Sparse_Attention_Kernel
 Triton kernels for sparse attention
