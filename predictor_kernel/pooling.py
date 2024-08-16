@@ -29,7 +29,7 @@ def is_hip():
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN, 'BLOCK_D': BD}, num_stages=s, num_warps=w) \
     for BM in [64]\
-    for BN in [16,32,64,128]\
+    for BN in [128]\
     for BD in [32,64]\
     for s in ([1] if is_hip() else [3, 4, 7])\
     for w in [4, 8]\
@@ -78,7 +78,7 @@ class pooling_mm(torch.autograd.Function):
             waves_per_eu = 3 if HEAD_DIM <= 64 else 2
             extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
 
-        grid = lambda args: (triton.cdiv(N_CTX, args["BLOCK_M"]), BATCH * N_HEADS, triton.cdiv(HIDDEN_DIM, args["BLOCK_D"]), 1)
+        grid = lambda args: (triton.cdiv(N_CTX, args["BLOCK_M"]), BATCH * N_HEADS, 1)
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         max_pooling[grid](
             q, w, p_out, #
@@ -103,7 +103,7 @@ def max_pooling(Q, W, Out,
                 BLOCK_N: tl.constexpr,  #
                 BLOCK_D: tl.constexpr,  #
                 ):
-    start_d = tl.program_id(2)
+    # start_d = tl.program_id(2)
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
     off_z = off_hz // H
@@ -125,30 +125,31 @@ def max_pooling(Q, W, Out,
         base=W + w_offset,
         shape=(HEAD_DIM, HIDDEN_DIM), 
         strides=(stride_wk, stride_wn),
-        offsets=(0, start_d * BLOCK_D),
-        block_shape=(BLOCK_N, BLOCK_D),
+        offsets=(0, 0),
+        block_shape=(BLOCK_N, HIDDEN_DIM),
         order=(0, 1),
     )
     Out_block_ptr = tl.make_block_ptr(
         base=Out + o_offset,
         shape=(N_CTX // BLOCK_M, HIDDEN_DIM),
         strides=(stride_om, stride_ok),
-        offsets=(start_m, start_d * BLOCK_D),
-        block_shape=(1, BLOCK_D),
+        offsets=(start_m, 0),
+        block_shape=(1, HIDDEN_DIM),
         order=(0, 1),
     )
     # q = tl.load(Q_block_ptr)
     # q_sum = tl.sum(q, axis=0).to(tl.float16)[None, :] / BLOCK_M
     # print(q_sum.shape)
     # q = tl.max(q, 0).to(tl.float16)[None, :]
-    qw = tl.zeros((1, BLOCK_D), dtype=tl.float32)
-    for m in range(0, tl.cdiv(HEAD_DIM, BLOCK_N)):
-        q = tl.load(Q_block_ptr)
-        q = tl.max(q, 0).to(tl.float16)[None, :]
-        w = tl.load(W_block_ptr)
-        qw += tl.sum(q[:, :, None] * w, axis=1)
-        Q_block_ptr = tl.advance(Q_block_ptr, (0, BLOCK_N))
-        W_block_ptr = tl.advance(W_block_ptr, (BLOCK_N, 0))
+    qw = tl.zeros((1, HIDDEN_DIM), dtype=tl.float32)
+    # for m in range(0, tl.cdiv(HEAD_DIM, BLOCK_N)):
+    q = tl.load(Q_block_ptr)
+    w = tl.load(W_block_ptr)
+    q = tl.max(q, 0).to(tl.float16)[None, :]
+    
+    qw += tl.sum(q[:, :, None] * w, axis=1)
+        # Q_block_ptr = tl.advance(Q_block_ptr, (0, BLOCK_N))
+        # W_block_ptr = tl.advance(W_block_ptr, (BLOCK_N, 0))
     # tl.store(Out_block_ptr, q.to(Out.type.element_ty))
     tl.store(Out_block_ptr, qw.to(Out.type.element_ty))
 
