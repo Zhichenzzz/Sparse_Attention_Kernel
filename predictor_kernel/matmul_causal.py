@@ -85,7 +85,7 @@ def matmul_kernel_causal(
         c_block_ptr = tl.advance(c_block_ptr, (0, BLOCK_SIZE_N))  
 
 
-def matmul(a, b, causal=False):
+def triton_matmul(a, b):
     # Check constraints.
     assert a.is_contiguous(), "Matrix A must be contiguous"
     Z, H_a, M, K = a.shape
@@ -117,7 +117,7 @@ def test():
     a = torch.randn(BATCH, N_HEADS, N_DOWNSAMPLE, HIDDEN_DIM, device='cuda', dtype=torch.float16)
     b = torch.randn(BATCH, N_HEADS // 4, N_DOWNSAMPLE, HIDDEN_DIM, device='cuda', dtype=torch.float16)
     for causal in [True]:
-        triton_output = matmul(a, b, causal=causal)
+        triton_output = triton_matmul(a, b)
         torch_output = torch_matmul(a, b, causal=causal)
         rtol = 0
         if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
@@ -154,7 +154,7 @@ def benchmark(BATCH, N_HEADS, N_DOWNSAMPLE, HIDDEN_DIM, causal, provider):
         fn = lambda: torch_matmul(a, b, causal)
         ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
     if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b, causal), quantiles=quantiles)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: triton_matmul(a, b), quantiles=quantiles)
     return ms, min_ms, max_ms
 
 
