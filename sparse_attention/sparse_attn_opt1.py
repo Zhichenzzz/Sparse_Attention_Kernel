@@ -56,10 +56,7 @@ def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, lut,  #
         acc = acc * alpha[:, None]
         # update acc
         v = tl.load(tl.advance(V_block_ptr, (start_n, 0)))
-        if fp8_v:
-            p = p.to(tl.float8e5)
-        else:
-            p = p.to(tl.float16)
+        p = p.to(tl.float16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
@@ -101,10 +98,7 @@ def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, lut,  #
             acc = acc * alpha[:, None]
             # update acc
             v = tl.load(tl.advance(V_block_ptr, (start_n, 0)))
-            if fp8_v:
-                p = p.to(tl.float8e5)
-            else:
-                p = p.to(tl.float16)
+            p = p.to(tl.float16)
             acc = tl.dot(p, v, acc)
             # update m_i and l_i
             m_i = m_ij
@@ -116,7 +110,7 @@ def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, lut,  #
 # re-tuning.
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM, BN in [(128, 128)]\
+    for BM, BN in [(64, 64)]\
     for s in ([1] if is_hip() else [3, 4, 7])\
     for w in [4, 8]\
 ]
@@ -321,8 +315,8 @@ except BaseException:
     HAS_FLASH = False
 
 TORCH_HAS_FP8 = None
-BATCH, N_HEADS, HEAD_DIM, N_CTX = 4, 32, 128, 32768
-BLOCK_SIZE = 128
+BATCH, N_HEADS, HEAD_DIM, N_CTX = 4, 32, 128, 16384
+BLOCK_SIZE = 64
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd"]:
@@ -384,5 +378,5 @@ if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     # pytest.main([__file__])
     # bench_flash_attention.run(save_path="./fused-pooling-flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./block_results_32k/", print_data=True)
+    bench_flash_attention_gqa.run(save_path="./block_results_16k/", print_data=True)
     
