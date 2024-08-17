@@ -24,7 +24,7 @@ def is_hip():
 
 
 @triton.jit
-def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, lut,  #
+def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, nnz_id,  #
                     K_block_ptr, V_block_ptr,  #
                     start_m, qk_scale,  #
                     TOPK: tl.constexpr,  #
@@ -33,7 +33,7 @@ def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, lut,  #
                     offs_m: tl.constexpr, offs_n: tl.constexpr,  #
                     N_CTX: tl.constexpr, fp8_v: tl.constexpr):
     
-    l_offset =  lut + l_offset + start_m * stride_lm
+    l_offset =  nnz_id + l_offset + start_m * stride_lm
     for nnz_id in range(TOPK):
         present_nnz_id = tl.load(l_offset + nnz_id * stride_ln)
         start_n = present_nnz_id * BLOCK_N
@@ -64,7 +64,7 @@ def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, lut,  #
     return acc
 
 @triton.jit
-def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, lut,  #
+def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, nnz_id,  #
                     K_block_ptr, V_block_ptr,  #
                     start_m, qk_scale,  #
                     TOPK: tl.constexpr,  #
@@ -73,7 +73,7 @@ def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, lut,  #
                     offs_m: tl.constexpr, offs_n: tl.constexpr,  #
                     N_CTX: tl.constexpr, fp8_v: tl.constexpr):
     
-    l_offset =  lut + l_offset + start_m * stride_lm
+    l_offset =  nnz_id + l_offset + start_m * stride_lm
     for nnz_id in range(TOPK):
         present_nnz_id = tl.load(l_offset + nnz_id * stride_ln)
         if start_m >= present_nnz_id:
@@ -127,7 +127,7 @@ def keep(conf):
 @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
 def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
-              lut,  #
+              nnz_id,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  #
               stride_kz, stride_kh, stride_kn, stride_kk,  #
               stride_vz, stride_vh, stride_vk, stride_vn,  #
@@ -204,7 +204,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
     # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
     if STAGE == 1:
-        acc = _attn_fwd_inner_casual_false(acc, l_i, m_i, q, lut,  #
+        acc = _attn_fwd_inner_casual_false(acc, l_i, m_i, q, nnz_id,  #
                                         K_block_ptr, V_block_ptr,  #
                                         start_m, qk_scale,  #
                                         TOPK,
@@ -213,7 +213,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
                                         offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
                                         )
     elif STAGE == 3:
-        acc = _attn_fwd_inner_casual_true(acc, l_i, m_i, q, lut,  #
+        acc = _attn_fwd_inner_casual_true(acc, l_i, m_i, q, nnz_id,  #
                                         K_block_ptr, V_block_ptr,  #
                                         start_m, qk_scale,  #
                                         TOPK,
@@ -229,7 +229,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, lut, causal, sm_scale):
+    def forward(ctx, q, k, v, nnz_id, causal, sm_scale):
         # shape constraints
         HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
         # when v is in float8_e5m2 it is transposed.
@@ -242,7 +242,7 @@ class _attention(torch.autograd.Function):
         o = torch.empty_like(q)
         autotuned_config = _attn_fwd.configs[0]
         BLOCK_N = autotuned_config.kwargs["BLOCK_N"]
-        topk = min(lut.shape[-1], q.shape[2]//BLOCK_N)
+        topk = min(nnz_id.shape[-1], q.shape[2]//BLOCK_N)
         stage = 3 if causal else 1
         extra_kern_args = {}
         # Tuning for AMD target
@@ -254,12 +254,12 @@ class _attention(torch.autograd.Function):
         M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
         _attn_fwd[grid](
             q, k, v, sm_scale, M, o,  #
-            lut,  #
+            nnz_id,  #
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
             k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
             v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
             o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
-            lut.stride(0), lut.stride(1), lut.stride(2), lut.stride(3),  #
+            nnz_id.stride(0), nnz_id.stride(1), nnz_id.stride(2), nnz_id.stride(3),  #
             q.shape[0], q.shape[1],  #
             N_CTX=q.shape[2],  #
             n_rep=n_rep,  #
@@ -301,8 +301,8 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     ref_out = torch.matmul(p, v_ref)
 
     # triton implementation
-    lut = torch.topk(mxp, 3, dim=-1).indices
-    tri_out= attention(q, k, v, lut, causal, sm_scale)
+    nnz_id = torch.topk(mxp, 3, dim=-1).indices
+    tri_out= attention(q, k, v, nnz_id, causal, sm_scale)
     
     # compare
     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
@@ -360,8 +360,8 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, topk, BLOCK_SIZE, causa
         p = torch.randn((BATCH, H, N_CTX // BLOCK_SIZE, N_CTX // BLOCK_SIZE), dtype=dtype, device=device)
         if causal:
             p[:, :, M == 0] = float("-inf")
-        lut = torch.topk(p, topk, dim=-1).indices
-        fn = lambda: attention(q, k, v, lut, causal, sm_scale)
+        nnz_id = torch.topk(p, topk, dim=-1).indices
+        fn = lambda: attention(q, k, v, nnz_id, causal, sm_scale)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if provider == "flash":
         q = torch.randn((BATCH, N_CTX, H, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
