@@ -47,14 +47,17 @@ def keep(conf):
 class pooling_mm(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, w):
+    def forward(ctx, q, k, w):
         BATCH, N_HEADS, N_CTX, HEAD_DIM = q.shape
+        K_HEADS = k.shape[1]
+        n_rep = N_HEADS // K_HEADS
         # w n_head, hidden_dim, head_dim
         # shape constraints
         assert HEAD_DIM == w.shape[1]
         autotuned_config = max_pooling.configs[0]
         BLOCK_M = autotuned_config.kwargs["BLOCK_M"]
-        p_out = torch.empty((BATCH, N_HEADS, N_CTX // BLOCK_M, HEAD_DIM), device=q.device, dtype=q.dtype)
+        q_down = torch.empty((BATCH, N_HEADS, N_CTX // BLOCK_M, HEAD_DIM), device=q.device, dtype=q.dtype)
+        k_down = torch.empty((BATCH, K_HEADS, N_CTX // BLOCK_M, HEAD_DIM * 2), device=q.device, dtype=q.dtype)
         n_d = triton.cdiv(q.shape[2], BLOCK_M)
         o = torch.empty((BATCH, N_HEADS, n_d, w.shape[-1]), device=q.device, dtype=q.dtype)
         extra_kern_args = {}
@@ -65,19 +68,23 @@ class pooling_mm(torch.autograd.Function):
 
         grid = lambda args: (triton.cdiv(N_CTX, args["BLOCK_M"]), BATCH * N_HEADS, 1)
         max_pooling[grid](
-            q, p_out, #
+            q, k, q_down, k_down, n_rep,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            p_out.stride(0), p_out.stride(1), p_out.stride(2), p_out.stride(3),
+            q_down.stride(0), q_down.stride(1), q_down.stride(2), q_down.stride(3),
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            k_down.stride(0), k_down.stride(1), k_down.stride(2), k_down.stride(3),
             N_HEADS, N_CTX, HEAD_DIM, 
             **extra_kern_args,)
-        o = torch.matmul(p_out, w)
-        return o
+        # o = torch.matmul(q_down, w)
+        return q_down, k_down
    
 @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def max_pooling(Q, Out,
+def max_pooling(Q, K, Q_down, K_down, n_rep,  #
                 stride_qz, stride_qh, stride_qm, stride_qk,  #
-                stride_oz, stride_oh, stride_om, stride_ok,  #
+                stride_qdz, stride_qdh, stride_qdm, stride_qdk,  #
+                stride_kz, stride_kh, stride_km, stride_kk,  #
+                stride_kdz, stride_kdh, stride_kdm, stride_kdk,  #
                 H, N_CTX,  #
                 HEAD_DIM: tl.constexpr,  #
                 BLOCK_M: tl.constexpr,  #
@@ -87,8 +94,12 @@ def max_pooling(Q, Out,
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
+    off_kh = off_h // n_rep
+    off_num = off_h % n_rep
     q_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
-    o_offset = off_z.to(tl.int64) * stride_oz + off_h.to(tl.int64) * stride_oh
+    qd_offset = off_z.to(tl.int64) * stride_qdz + off_h.to(tl.int64) * stride_qdh
+    k_offset = off_z.to(tl.int64) * stride_kz + off_kh.to(tl.int64) * stride_kh
+    kd_offset = off_z.to(tl.int64) * stride_kdz + off_kh.to(tl.int64) * stride_kdh
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
         base=Q + q_offset,
@@ -98,17 +109,43 @@ def max_pooling(Q, Out,
         block_shape=(BLOCK_M, HEAD_DIM),
         order=(1, 0),
     )
-    Out_block_ptr = tl.make_block_ptr(
-        base=Out + o_offset,
+    Q_down_block_ptr = tl.make_block_ptr(
+        base=Q_down + qd_offset,
         shape=(N_CTX // BLOCK_M, HEAD_DIM),
-        strides=(stride_om, stride_ok),
+        strides=(stride_qdm, stride_qdk),
+        offsets=(start_m, 0),
+        block_shape=(1, HEAD_DIM),
+        order=(0, 1),
+    )
+    K_block_ptr = tl.make_block_ptr(
+        base=K + k_offset,
+        shape=(N_CTX, HEAD_DIM),
+        strides=(stride_km, stride_kk),
+        offsets=(start_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, HEAD_DIM),
+        order=(1, 0),
+    )
+    K_down_block_ptr = tl.make_block_ptr(
+        base=K_down + kd_offset,
+        shape=(N_CTX // BLOCK_M, HEAD_DIM * 2),
+        strides=(stride_kdm, stride_kdk),
         offsets=(start_m, 0),
         block_shape=(1, HEAD_DIM),
         order=(0, 1),
     )
     q = tl.load(Q_block_ptr)
-    q = tl.max(q, 0).to(tl.float16)[None, :]
-    tl.store(Out_block_ptr, q.to(Out.type.element_ty))
+    q = tl.sum(q, 0).to(tl.float16)[None, :] / BLOCK_M
+    tl.store(Q_down_block_ptr, q.to(Q_down.type.element_ty))
+
+    # K Dowmsample
+    if off_num == 0:
+        k = tl.load(K_block_ptr)
+        k_max = tl.max(k, 0).to(tl.float16)[None, :]
+        tl.store(K_down_block_ptr, k_max.to(K_down.type.element_ty))
+        K_down_block_ptr = tl.advance(K_down_block_ptr, (0, HEAD_DIM))
+        k_min = tl.min(k, 0).to(tl.float16)[None, :]
+        tl.store(K_down_block_ptr, k_min.to(K_down.type.element_ty))
+        
 
 
 pooling = pooling_mm.apply
@@ -129,19 +166,33 @@ def test_pooling(q,k,w):
     p = torch.matmul(q, w)
     k = k[:, :, None, :, :].expand(BATCH, K_HEADS, N_HEADS // K_HEADS, N_CTX // 64, HEAD_DIM).reshape(BATCH, N_HEADS, N_CTX // 64, HEAD_DIM)
     o = torch.matmul(p, k.transpose(-1, -2))
-    return o
+
+    M = torch.tril(torch.ones((N_CTX // 64, N_CTX // 64), device="cuda"))
+    o[:, :, M == 0] = float("-inf")
+    nnz_id = torch.topk(o, 5, dim=-1).indices
+    return nnz_id
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM", [(4, 32, 16384, 128, 256)])
 def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
     torch.manual_seed(20)
     q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    k = (torch.empty((Z, H // 4, N_CTX, HEAD_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     w = (torch.empty((H, HEAD_DIM, HIDDEN_DIM), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    tri_out = pooling(q, w)
+    q_down, k_down = pooling(q, k, w)
     q = q.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
-    q = torch.max_pool1d(q, kernel_size=64, stride=64, ceil_mode=True)
+    q = torch.avg_pool1d(q, kernel_size=64, stride=64, ceil_mode=True)
     q = q.transpose(-1, -2).reshape(Z, H, -1, HEAD_DIM)
-    ref_out = torch.matmul(q, w)
-    assert torch.allclose(tri_out, ref_out, atol=1e-3, rtol=1e-3)
+
+    k = k.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
+    k_max = torch.max_pool1d(k, kernel_size=64, stride=64, ceil_mode=True)
+    k_min = -torch.max_pool1d(-k, kernel_size=64, stride=64, ceil_mode=True)
+    k = torch.cat((k_max, k_min), dim=1)
+    k = k.view(Z, H // 4, HEAD_DIM * 2, -1)
+    k = k.transpose(-1, -2).reshape(Z, H // 4, -1, HEAD_DIM * 2)
+
+    # ref_out = torch.matmul(q, w)s
+    assert torch.allclose(q_down, q, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(k_down, k, atol=1e-3, rtol=1e-3)
 
 
 
@@ -177,8 +228,9 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, mode, provider,
     dtype = torch.float16
     if "triton" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn((BATCH, H // 4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         w = torch.randn((H, HEAD_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
-        fn = lambda: pooling(q, w)
+        fn = lambda: pooling(q, k, w)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if "torch" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
@@ -191,5 +243,5 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, mode, provider,
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path="./test/", print_data=True)
-    # pytest.main([__file__])
+    bench_flash_attention.run(save_path="./two_pooling/", print_data=True)
+    pytest.main([__file__])
