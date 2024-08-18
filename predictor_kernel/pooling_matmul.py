@@ -114,12 +114,21 @@ def max_pooling(Q, Out,
 pooling = pooling_mm.apply
 
 @pytest.mark.skip
-def test_pooling(q,w):
+def test_pooling(q,k,w):
     BATCH, N_HEADS, N_CTX, HEAD_DIM = q.shape
+    K_HEADS = k.shape[1]
+
     q = q.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
     q = torch.max_pool1d(q, kernel_size=64, stride=64, ceil_mode=True)
     q = q.transpose(-1, -2).reshape(BATCH, N_HEADS, -1, HEAD_DIM)
-    o = torch.matmul(q, w)
+
+    k = k.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
+    k = torch.max_pool1d(k, kernel_size=64, stride=64, ceil_mode=True)
+    k = k.transpose(-1, -2).reshape(BATCH, K_HEADS, -1, HEAD_DIM)
+
+    p = torch.matmul(q, w)
+    k = k[:, :, None, :, :].expand(BATCH, K_HEADS, N_HEADS // K_HEADS, N_CTX // 64, HEAD_DIM).reshape(BATCH, N_HEADS, N_CTX // 64, HEAD_DIM)
+    o = torch.matmul(p, k.transpose(-1, -2))
     return o
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM", [(4, 32, 16384, 128, 256)])
@@ -149,7 +158,7 @@ for mode in ["fwd"]:
             line_names=["Triton-fp16"] + ["Torch-fp16"],
             styles=[("red", "-"), ("blue", "-")],
             ylabel="ms",
-            plot_name=f"pooling-matmul-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}",
+            plot_name=f"pooling-matmul-batch{BATCH}-hidden{HIDDEN_DIM}-d{HEAD_DIM}-{mode}",
             args={
                 "H": N_HEADS,
                 "BATCH": BATCH,
@@ -173,13 +182,14 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, mode, provider,
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if "torch" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn((BATCH, H // 4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         w = torch.randn((H, HEAD_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
-        fn = lambda: test_pooling(q, w)
+        fn = lambda: test_pooling(q, k, w)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     return ms
 
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path="./pooling_matmul/", print_data=True)
-    pytest.main([__file__])
+    bench_flash_attention.run(save_path="./test/", print_data=True)
+    # pytest.main([__file__])
