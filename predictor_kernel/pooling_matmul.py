@@ -164,8 +164,9 @@ def qk_downsampling(Q, K, Q_down, K_down, n_rep, #
         order=(0, 1),
     )
     q = tl.load(Q_block_ptr)
-    q = tl.sum(q, 0)[None, :] / BLOCK_M
-    tl.store(Q_down_block_ptr, q.to(Q_down.type.element_ty))
+    q = q.to(tl.float32)
+    q = (tl.sum(q, 0)[None, :] / BLOCK_M).to(tl.float16)
+    tl.store(Q_down_block_ptr, q)
 
     # K Dowmsample
     if off_num == 0:
@@ -198,6 +199,7 @@ class mask_predictor_kernel(torch.autograd.Function):
             waves_per_eu = 3 if HEAD_DIM <= 64 else 2
             extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
 
+        # Numerical error in the kernel if q dtype is float16
         grid = lambda args: (triton.cdiv(N_CTX, args["BLOCK_M"]), BATCH * N_HEADS, 1)
         qk_downsampling[grid](
             q, k, q_down, k_down, n_rep,
@@ -261,9 +263,6 @@ def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
     q = q.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
     q = torch.avg_pool1d(q, kernel_size=64, stride=64, ceil_mode=True)
     q = q.transpose(-1, -2).reshape(Z, H, -1, HEAD_DIM)
-
-    # TODO: error is from avg_pool1d
-    # assert torch.allclose(q, q_, atol=1e-5, rtol=0)
 
     k = k.transpose(-1, -2).reshape(-1, HEAD_DIM, N_CTX)
     k_max = torch.max_pool1d(k, kernel_size=64, stride=64, ceil_mode=True)
@@ -336,4 +335,4 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, topk, mode, pro
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     bench_flash_attention.run(save_path="./mask_predictor/", print_data=True)
-    # pytest.main([__file__])
+    pytest.main([__file__])
