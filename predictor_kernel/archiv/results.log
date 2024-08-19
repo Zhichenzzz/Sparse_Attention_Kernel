@@ -1,3 +1,4 @@
+qkdsqw_matmul:
 pooling-matmul-batch4-hidden256-d128-fwd:
      N_CTX  Triton-fp16  Torch-fp16
 0   1024.0     0.215222    0.308804
@@ -9,7 +10,7 @@ pooling-matmul-batch4-hidden256-d128-fwd:
 6  65536.0     6.135194   10.864185
 
 
-fused:
+fused two matmul:
 pooling-matmul-batch4-hidden256-d128-fwd:
      N_CTX  Triton-fp16  Torch-fp16
 0   1024.0     0.120913    0.307357
@@ -19,3 +20,15 @@ pooling-matmul-batch4-hidden256-d128-fwd:
 4  16384.0     1.334104    2.693179
 5  32768.0     2.751488    5.253519
 6  65536.0     6.514834   10.864868
+
+
+fused matmul with downsample:
+pooling-matmul-batch4-hidden256-d128-fwd:
+     N_CTX  Triton-fp16  Torch-fp16
+0   1024.0     0.126796    0.306714
+1   2048.0     0.207849    0.546343
+2   4096.0     0.391734    1.052956
+3   8192.0     0.834458    1.464469
+4  16384.0     1.982375    2.692681
+5  32768.0     3.913856    5.250390
+6  65536.0     8.553101   10.859861
