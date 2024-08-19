@@ -9,10 +9,10 @@ def is_cuda():
 def get_autotune_config():
     cuda_configs = [
         triton.Config(
-            {'BLOCK_SIZE_M': BM, 'BLOCK_SIZE_N': BN},
+            {'BLOCK_M': BM, 'BLOCK_N': BN},
             num_stages=ns, num_warps=nw
         )
-        for BM, BN in [(64, 64), (32, 32)]\
+        for BM, BN in [(64, 64)]\
         for ns in ([3, 4, 7])\
         for nw in ([4, 8])\
         
@@ -32,8 +32,8 @@ def matmul_kernel_causal(
         Z, H, n_rep,
         N: tl.constexpr,
         K: tl.constexpr,
-        BLOCK_SIZE_M: tl.constexpr, 
-        BLOCK_SIZE_N: tl.constexpr, 
+        BLOCK_M: tl.constexpr, 
+        BLOCK_N: tl.constexpr, 
 ):
     off_hz = tl.program_id(axis=0)
     start_m = tl.program_id(axis=1)
@@ -46,10 +46,10 @@ def matmul_kernel_causal(
 
     a_block_ptr = tl.make_block_ptr(
         base = a_ptr + a_offset,
-        shape=(BLOCK_SIZE_M, K),
+        shape=(BLOCK_M, K),
         strides=(stride_am, stride_ak),
-        offsets=(start_m * BLOCK_SIZE_M, 0),
-        block_shape=(BLOCK_SIZE_M, K),
+        offsets=(start_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, K),
         order=(0, 1)
     )
     b_block_ptr = tl.make_block_ptr(
@@ -57,23 +57,23 @@ def matmul_kernel_causal(
         shape=(K, N),
         strides=(stride_bn, stride_bk),
         offsets=(0, 0),
-        block_shape=(K, BLOCK_SIZE_N),
+        block_shape=(K, BLOCK_N),
         order=(0, 1)
     )
     c_block_ptr = tl.make_block_ptr(
         base = c_ptr + c_offset,
-        shape=(BLOCK_SIZE_M, N),
+        shape=(BLOCK_M, N),
         strides=(stride_cm, stride_cn),
-        offsets=(start_m * BLOCK_SIZE_M, 0),
-        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+        offsets=(start_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_N),
         order=(0, 1)
     )
 
-    offs_m = start_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = tl.arange(0, BLOCK_SIZE_N)
-    lo, hi = 0, (start_m + 1) * BLOCK_SIZE_M
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    lo, hi = 0, (start_m + 1) * BLOCK_M
 
-    for start_n in range(lo, hi, BLOCK_SIZE_N):
+    for start_n in range(lo, hi, BLOCK_N):
         q = tl.load(a_block_ptr)
         k = tl.load(b_block_ptr)
         qk = tl.dot(q, k)
@@ -81,8 +81,8 @@ def matmul_kernel_causal(
         qk = qk + tl.where(mask, 0, -1.0e6)
         qk = qk.to(tl.float16)
         tl.store(c_block_ptr, qk)
-        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_SIZE_N))
-        c_block_ptr = tl.advance(c_block_ptr, (0, BLOCK_SIZE_N))  
+        b_block_ptr = tl.advance(b_block_ptr, (0, BLOCK_N))
+        c_block_ptr = tl.advance(c_block_ptr, (0, BLOCK_N))  
 
 
 def triton_matmul(a, b):
@@ -93,7 +93,7 @@ def triton_matmul(a, b):
     n_rep = H_a // H_b
     # Allocates output.
     c = torch.empty((Z, H_a, M, M), device=a.device, dtype=torch.float16) - 1.0e6
-    grid = lambda META: (Z * H_a, triton.cdiv(M, META['BLOCK_SIZE_M']) )
+    grid = lambda META: (Z * H_a, triton.cdiv(M, META['BLOCK_M']) )
     matmul_kernel_causal[grid](
         a, b, c,
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
@@ -113,7 +113,7 @@ def torch_matmul(a, b, causal=False):
     return torch_output
 
 def test():
-    BATCH, N_HEADS, N_DOWNSAMPLE, HIDDEN_DIM = 1, 32, 1024, 256
+    BATCH, N_HEADS, N_DOWNSAMPLE, HIDDEN_DIM = 4, 32, 1024, 256
     a = torch.randn(BATCH, N_HEADS, N_DOWNSAMPLE, HIDDEN_DIM, device='cuda', dtype=torch.float16)
     b = torch.randn(BATCH, N_HEADS // 4, N_DOWNSAMPLE, HIDDEN_DIM, device='cuda', dtype=torch.float16)
     for causal in [True]:
@@ -126,7 +126,7 @@ def test():
             print("❌ Triton and Torch differ")
 
 
-BATCH, N_HEADS, HIDDEN_DIM = 4, 32, 256
+BATCH, N_HEADS, HIDDEN_DIM = 2, 32, 256
 configs = []
 for causal in [True]:
     configs.append(
