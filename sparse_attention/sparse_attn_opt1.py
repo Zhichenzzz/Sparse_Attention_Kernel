@@ -326,7 +326,7 @@ for mode in ["fwd"]:
         configs.append(
             triton.testing.Benchmark(
                 x_names=["topk"],
-                x_vals=[i for i in range(0, 101, 5)],
+                x_vals=[i for i in range(0, 141, 5)],
                 line_arg="provider",
                 line_vals=["triton-fp16"] + (["flash"] if HAS_FLASH else []),
                 line_names=["Triton [FP16]"] + (["Flash-2"] if HAS_FLASH else []),
@@ -378,5 +378,5 @@ if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     pytest.main([__file__])
     # bench_flash_attention.run(save_path="./fused-pooling-flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./sparse_attn_topk_test/", print_data=True)
+    bench_flash_attention_gqa.run(save_path="./sparse_attn_32k/", print_data=True)
     

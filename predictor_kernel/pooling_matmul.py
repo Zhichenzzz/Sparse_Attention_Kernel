@@ -293,7 +293,7 @@ for mode in ["fwd"]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["topk"],
-            x_vals=[i for i in range(0, 101, 5)],
+            x_vals=[i for i in range(0, 141, 5)],
             line_arg="provider",
             line_vals=["triton-fp16"] + ["torch-fp16"],
             line_names=["Triton-fp16"] + ["Torch-fp16"],
