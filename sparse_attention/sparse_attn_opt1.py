@@ -294,8 +294,8 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
 
     if causal:
         p[:, :, M == 0] = float("-inf")
-    mxp = torch.max_pool2d(p, (128, 128), stride=(128, 128))
-    p = block_topk(p, 3, 128)
+    mxp = torch.max_pool2d(p, (64, 64), stride=(64, 64))
+    p = block_topk(p, 3, 64)
 
     p = torch.softmax(p, dim=-1)
     ref_out = torch.matmul(p, v_ref)
@@ -376,7 +376,7 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, topk, BLOCK_SIZE, causa
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    # pytest.main([__file__])
+    pytest.main([__file__])
     # bench_flash_attention.run(save_path="./fused-pooling-flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./sparse_attn_32k/", print_data=True)
+    bench_flash_attention_gqa.run(save_path="./sparse_attn_topk_test/", print_data=True)
     
