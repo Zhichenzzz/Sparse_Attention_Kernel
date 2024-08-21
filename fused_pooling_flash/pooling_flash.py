@@ -679,8 +679,12 @@ try:
 except BaseException:
     HAS_FLASH = False
 
-TORCH_HAS_FP8 = hasattr(torch, 'float8_e5m2')
-BATCH, N_HEADS, HEAD_DIM = 4, 32, 128
+import sys
+sys.path.append("../")
+from flashattn2.flash_triton_orig import _attention as _triton_attention
+triton_attention = _triton_attention.apply
+
+BATCH, N_HEADS, HEAD_DIM = 2, 32, 128
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd", "bwd"]:
@@ -690,15 +694,13 @@ for mode in ["fwd", "bwd"]:
         configs.append(
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
-                x_vals=[2**i for i in range(10, 15)],
+                x_vals=[2**i for i in range(10, 17)],
                 line_arg="provider",
-                line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
-                (["flash"] if HAS_FLASH else []),
-                line_names=["Triton [FP16] + Pooling"] + (["Triton [FP8] + Pooling"] if TORCH_HAS_FP8 else []) +
-                (["Flash-2"] if HAS_FLASH else []),
+                line_vals=["triton-pooling"]  + (["flash"] if HAS_FLASH else []) + ["triton"],
+                line_names=["Triton + Pooling"] + (["Flash-2"] if HAS_FLASH else []) + ["Triton"],
                 styles=[("red", "-"), ("blue", "-"), ("green", "-")],
                 ylabel="ms",
-                plot_name=f"fused-pooling-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}-causal={causal}",
+                plot_name=f"fused-pooling-attention-batch{BATCH}-{mode}-causal={causal}",
                 args={
                     "H": N_HEADS,
                     "BATCH": BATCH,
@@ -754,16 +756,10 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
     warmup = 25
     rep = 100
     dtype = torch.float16
-    if "triton" in provider:
+    if "pooling" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H//4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         v = torch.randn((BATCH, H//4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        if mode == "fwd" and "fp8" in provider:
-            q = q.to(torch.float8_e5m2)
-            k = k.to(torch.float8_e5m2)
-            v = v.permute(0, 1, 3, 2).contiguous()
-            v = v.permute(0, 1, 3, 2)
-            v = v.to(torch.float8_e5m2)
         sm_scale = 1.3
         fn = lambda: attention(q, k, v, causal, sm_scale)
         if mode == "bwd":
@@ -780,16 +776,21 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-    flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
-    total_flops = 2 * flops_per_matmul
-    if causal:
-        total_flops *= 0.5
-    if mode == "bwd":
-        total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+    if provider == "triton":
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        sm_scale = 1.3
+        fn = lambda: triton_attention(q, k, v, causal, sm_scale)
+        if mode == "bwd":
+            o, _ = fn()
+            do = torch.randn_like(o)
+            fn = lambda: o.backward(do, retain_graph=True)
+        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     return ms
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path="./pooling_flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./pooling_flashattn_gqa/", print_data=True)
+    # bench_flash_attention.run(save_path="./pooling_flashattn/", print_data=True)
+    bench_flash_attention_gqa.run(save_path="./pooling_flashattn_profiling/", print_data=True)
     pytest.main([__file__])
