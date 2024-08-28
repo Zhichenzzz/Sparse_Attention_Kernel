@@ -696,9 +696,9 @@ for mode in ["fwd", "bwd"]:
                 x_names=["N_CTX"],
                 x_vals=[2**i for i in range(10, 17)],
                 line_arg="provider",
-                line_vals=["triton-pooling"]  + (["flash"] if HAS_FLASH else []) + ["triton"],
-                line_names=["Triton + Pooling"] + (["Flash-2"] if HAS_FLASH else []) + ["Triton"],
-                styles=[("red", "-"), ("blue", "-"), ("green", "-")],
+                line_vals=["triton-pooling"]  + (["flash"] if HAS_FLASH else []) + ["triton"] + ["torch"],
+                line_names=["Triton + Pooling"] + (["Flash-2"] if HAS_FLASH else []) + ["Triton"] + ["Torch"],
+                styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("black", "-")],
                 ylabel="ms",
                 plot_name=f"fused-pooling-attention-batch{BATCH}-{mode}-causal={causal}",
                 args={
@@ -784,6 +784,17 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
         fn = lambda: triton_attention(q, k, v, causal, sm_scale)
         if mode == "bwd":
             o, _ = fn()
+            do = torch.randn_like(o)
+            fn = lambda: o.backward(do, retain_graph=True)
+        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+    if provider == "torch":
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        sm_scale = 1.3
+        fn = lambda: torch.matmul(torch.softmax(torch.matmul(q, k.transpose(-2, -1) * sm_scale), dim=-1), v)
+        if mode == "bwd":
+            o = fn()
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
