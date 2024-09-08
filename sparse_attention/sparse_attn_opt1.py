@@ -41,7 +41,7 @@ def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, nnz_id,  #
         start_n = start_n.to(tl.int32)
 
         # -- compute qk ----
-        k = tl.load(tl.advance(K_block_ptr, (0, start_n)))
+        k = tl.load(tl.advance(K_block_ptr, (0, start_n)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
         qk = tl.dot(q, k)
         max = tl.max(qk, 1)
         m_ij = tl.maximum(m_i, max)
@@ -55,7 +55,7 @@ def _attn_fwd_inner_casual_false(acc, l_i, m_i, q, nnz_id,  #
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(tl.advance(V_block_ptr, (start_n, 0)))
+        v = tl.load(tl.advance(V_block_ptr, (start_n, 0)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
         p = p.to(tl.float16)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
@@ -81,7 +81,7 @@ def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, nnz_id,  #
             start_n = tl.multiple_of(start_n, BLOCK_N)
             start_n = start_n.to(tl.int32)
             # -- compute qk ----
-            k = tl.load(tl.advance(K_block_ptr, (0, start_n)))
+            k = tl.load(tl.advance(K_block_ptr, (0, start_n)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
             qk = tl.dot(q, k)
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])
             qk = qk + tl.where(mask, 0, -1.0e6)
@@ -97,7 +97,7 @@ def _attn_fwd_inner_casual_true(acc, l_i, m_i, q, nnz_id,  #
             # -- update output accumulator --
             acc = acc * alpha[:, None]
             # update acc
-            v = tl.load(tl.advance(V_block_ptr, (start_n, 0)))
+            v = tl.load(tl.advance(V_block_ptr, (start_n, 0)), boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
             p = p.to(tl.float16)
             acc = tl.dot(p, v, acc)
             # update m_i and l_i
@@ -198,7 +198,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
-    q = tl.load(Q_block_ptr)
+    q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero") # make sure that the last block is padded with zero
     q = (q * qk_scale).to(tl.float16)
     # stage 1: off-band
     # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
@@ -223,7 +223,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
                                         )
 
     # epilogue
-    tl.store(O_block_ptr, acc.to(Out.type.element_ty))
+    tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0, 1))
 
 
 class _attention(torch.autograd.Function):
@@ -277,7 +277,7 @@ from utils import block_topk
 import time
 
 
-@pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(2, 32, 4096, 128)])
+@pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(2, 32, 4000, 128)])
 @pytest.mark.parametrize("causal", [True, False])
 def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     torch.manual_seed(20)
@@ -289,8 +289,14 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     # reference implementation
     k_ref = k[:, :, None, :, :].expand(Z, H//n_rep, n_rep, N_CTX, HEAD_DIM).reshape(Z, H, N_CTX, HEAD_DIM)
     v_ref = v[:, :, None, :, :].expand(Z, H//n_rep, n_rep, N_CTX, HEAD_DIM).reshape(Z, H, N_CTX, HEAD_DIM)
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-    p = torch.matmul(q, k_ref.transpose(2, 3)) * sm_scale
+
+    q_ref = torch.nn.functional.pad(q, (0, 0, 0, (64 - N_CTX % 64) % 64), value=0)
+    k_ref = torch.nn.functional.pad(k_ref, (0, 0, 0, (64 - N_CTX % 64) % 64), value=0)
+    v_ref = torch.nn.functional.pad(v_ref, (0, 0, 0, (64 - N_CTX % 64) % 64), value=0)
+
+    nearest_ctx = ((N_CTX + 63) // 64) * 64
+    M = torch.tril(torch.ones((nearest_ctx, nearest_ctx), device="cuda"))
+    p = torch.matmul(q_ref, k_ref.transpose(2, 3)) * sm_scale
 
     if causal:
         p[:, :, M == 0] = float("-inf")
@@ -298,7 +304,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     p = block_topk(p, 3, 64)
 
     p = torch.softmax(p, dim=-1)
-    ref_out = torch.matmul(p, v_ref)
+    ref_out = torch.matmul(p, v_ref)[:,:,:N_CTX,:]
 
     # triton implementation
     nnz_id = torch.topk(mxp, 3, dim=-1).indices
@@ -378,5 +384,5 @@ if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     pytest.main([__file__])
     # bench_flash_attention.run(save_path="./fused-pooling-flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./sparse_attn_32k/", print_data=True)
+    # bench_flash_attention_gqa.run(save_path="./sparse_attn_32k/", print_data=True)
     
