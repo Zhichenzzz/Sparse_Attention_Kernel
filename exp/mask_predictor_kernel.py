@@ -286,7 +286,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
 
 
 BATCH, N_HEADS, HEAD_DIM, HIDDEN_DIM= 1, 32, 128, 256
-N_CTX = 262144
+N_CTX = 1024
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd"]:
