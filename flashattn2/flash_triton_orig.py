@@ -31,7 +31,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        k = tl.load(K_block_ptr)
         qk = tl.dot(q, k)
         if STAGE == 2:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])
@@ -49,7 +49,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+        v = tl.load(V_block_ptr)
         if fp8_v:
             p = p.to(tl.float8e5)
         else:
@@ -147,7 +147,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
-    q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    q = tl.load(Q_block_ptr)
     # stage 1: off-band
     # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
     # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
@@ -171,7 +171,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     acc = acc / l_i[:, None]
     m_ptrs = M + off_hz * N_CTX + offs_m
     tl.store(m_ptrs, m_i)
-    tl.store(O_block_ptr, acc.to(Out.type.element_ty), boundary_check=(0, 1))
+    tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
 @triton.jit

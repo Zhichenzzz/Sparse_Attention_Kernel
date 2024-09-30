@@ -221,9 +221,9 @@ class mask_predictor_kernel(torch.autograd.Function):
             N_HEADS, n_rep, N_DOWNSAMPLE, HIDDEN_DIM, 
             **extra_kern_args,)
         
-        nnz_id = torch.topk(o, topk, dim=-1).indices
+        # nnz_id = torch.topk(o, topk, dim=-1).indices
 
-        return nnz_id
+        return o
 
 triton_mask_predictor = mask_predictor_kernel.apply
 
@@ -286,14 +286,14 @@ def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
 
 
 BATCH, N_HEADS, HEAD_DIM, HIDDEN_DIM= 1, 32, 128, 256
-N_CTX = 1024
+N_CTX = 131072
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd"]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["nz"],
-            x_vals=[1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125, 0.1, 0.05, 0],
+            x_vals=[1.0, 0.5, 0.4, 0.3, 0.2, 0.1],
             line_arg="provider",
             line_vals=["triton-fp16"] + ["torch-fp16"],
             line_names=["Triton-fp16"] + ["Torch-fp16"],
@@ -344,5 +344,5 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, nz, mode, provi
 
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path="./mask_predictor/", print_data=True)
+    bench_flash_attention.run(save_path="./mask_predictor_128k/", print_data=True)
     # pytest.main([__file__])

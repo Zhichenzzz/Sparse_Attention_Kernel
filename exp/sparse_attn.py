@@ -315,18 +315,18 @@ except BaseException:
     HAS_FLASH = False
 
 TORCH_HAS_FP8 = None
-BATCH, N_HEADS, HEAD_DIM, N_CTX = 1, 32, 128, 262144
+BATCH, N_HEADS, HEAD_DIM, N_CTX = 1, 32, 128, 131072
 BLOCK_SIZE = 64
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd"]:
-    for causal in [False, True]:
+    for causal in [True]:
         if mode == "bwd" and not causal:
             continue
         configs.append(
             triton.testing.Benchmark(
                 x_names=["nz"],
-                x_vals=[1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125, 0.1, 0.05, 0],
+                x_vals=[1.0, 0.5, 0.4, 0.3, 0.2, 0.1],
                 line_arg="provider",
                 line_vals=["triton-fp16"] + (["flash"] if HAS_FLASH else []),
                 line_names=["Triton [FP16]"] + (["Flash-2"] if HAS_FLASH else []),
@@ -390,5 +390,5 @@ if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     # pytest.main([__file__])
     # bench_flash_attention.run(save_path="./fused-pooling-flashattn/", print_data=True)
-    bench_flash_attention_gqa.run(save_path="./sparse_attn_seq_nz/", print_data=True)
+    bench_flash_attention_gqa.run(save_path="./sparse_attn_128k/", print_data=True)
     

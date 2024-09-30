@@ -684,20 +684,20 @@ sys.path.append("../")
 from flashattn2.flash_triton_orig import _attention as _triton_attention
 triton_attention = _triton_attention.apply
 
-BATCH, N_HEADS, HEAD_DIM = 2, 32, 128
+BATCH, N_HEADS, HEAD_DIM = 8, 32, 128
 # vary seq length for fixed head and batch=4
 configs = []
-for mode in ["fwd", "bwd"]:
-    for causal in [True, False]:
+for mode in ["fwd"]:
+    for causal in [True]:
         if mode == "bwd" and not causal:
             continue
         configs.append(
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
-                x_vals=[2**i for i in range(10, 17)],
+                x_vals=[1024, 4096, 8192, ],
                 line_arg="provider",
-                line_vals=["triton-pooling"]  + (["flash"] if HAS_FLASH else []) + ["triton"] + ["torch"],
-                line_names=["Triton + Pooling"] + (["Flash-2"] if HAS_FLASH else []) + ["Triton"] + ["Torch"],
+                line_vals=["torch"],
+                line_names=["torch"],
                 styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("black", "-")],
                 ylabel="ms",
                 plot_name=f"fused-pooling-attention-batch{BATCH}-{mode}-causal={causal}",
@@ -757,6 +757,7 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
     rep = 100
     dtype = torch.float16
     if "pooling" in provider:
+        start_record_memory_history()
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H//4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         v = torch.randn((BATCH, H//4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
@@ -767,7 +768,14 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        
+        
+        max_memory = torch.cuda.max_memory_allocated() // 2**20
+        print(f"pooling Max memory: {max_memory} MB")
+        export_memory_snapshot()
+        stop_record_memory_history()
     if provider == "flash":
+        start_record_memory_history()
         q = torch.randn((BATCH, N_CTX, H, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         kv = torch.randn((BATCH, N_CTX, 2, H//4, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         fn = lambda: flash_attn_kvpacked_func(q, kv, causal=causal)
@@ -776,7 +784,14 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+                
+        
+        max_memory = torch.cuda.max_memory_allocated() // 2**20
+        print(f"flash Max memory: {max_memory} MB")
+        export_memory_snapshot()
+        stop_record_memory_history()
     if provider == "triton":
+        start_record_memory_history()
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
@@ -787,7 +802,15 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+                
+        
+        max_memory = torch.cuda.max_memory_allocated() // 2**20
+        print(f"tritonflash Max memory: {max_memory} MB")
+        export_memory_snapshot()
+        stop_record_memory_history()
     if provider == "torch":
+        # ms = 0
+        start_record_memory_history()
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
@@ -798,8 +821,51 @@ def bench_flash_attention_gqa(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider,
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+                
+        
+        max_memory = torch.cuda.max_memory_allocated() // 2**20
+        print(f"torch Max memory: {max_memory} MB")
+        export_memory_snapshot()
+        stop_record_memory_history()
     return ms
 
+import logging
+logging.basicConfig(
+   format="%(levelname)s:%(asctime)s %(message)s",
+   level=logging.INFO,
+   datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger: logging.Logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.INFO)
+
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
+
+# Keep a max of 100,000 alloc/free events in the recorded history
+# leading up to the snapshot.
+MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
+def start_record_memory_history() -> None:
+    if not torch.cuda.is_available():
+        logger.info("CUDA unavailable. Not recording memory history")
+        return
+
+    logger.info("Starting snapshot record_memory_history")
+    torch.cuda.memory._record_memory_history(
+        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+    )
+
+def stop_record_memory_history() -> None:
+    if not torch.cuda.is_available():
+        logger.info("CUDA unavailable. Not recording memory history")
+        return
+
+    logger.info("Stopping snapshot record_memory_history")
+    torch.cuda.memory._record_memory_history(enabled=None)
+
+def export_memory_snapshot() -> None:
+    if not torch.cuda.is_available():
+        logger.info("CUDA unavailable. Not exporting memory snapshot")
+        return
+    
 if __name__ == "__main__":
     # only works on post-Ampere GPUs right now
     # bench_flash_attention.run(save_path="./pooling_flashattn/", print_data=True)
