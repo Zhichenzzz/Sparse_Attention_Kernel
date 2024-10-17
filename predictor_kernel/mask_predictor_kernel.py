@@ -180,7 +180,7 @@ def qk_downsampling(Q, K, Q_down, K_down, n_rep, #
 
 class mask_predictor_kernel(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, w, topk):
+    def forward(ctx, q, k, w, w2, topk):
         BATCH, N_HEADS, N_CTX, HEAD_DIM = q.shape
         K_HEADS = k.shape[1]
         HIDDEN_DIM = w.shape[-1]
@@ -213,6 +213,7 @@ class mask_predictor_kernel(torch.autograd.Function):
         grid = lambda args: (triton.cdiv(N_DOWNSAMPLE, args["BLOCK_M"]), BATCH * N_HEADS, 1)
         
         qw = torch.matmul(q_down, w)
+        qw = torch.matmul(qw, w2)
         matmul_kernel_causal[grid](
             qw, k_down, o,
             qw.stride(0), qw.stride(1), qw.stride(2), qw.stride(3),
@@ -221,14 +222,14 @@ class mask_predictor_kernel(torch.autograd.Function):
             N_HEADS, n_rep, N_DOWNSAMPLE, HIDDEN_DIM, 
             **extra_kern_args,)
         
-        nnz_id = torch.topk(o, topk, dim=-1).indices
+        # nnz_id = torch.topk(o, topk, dim=-1).indices
 
-        return nnz_id
+        return o
 
 triton_mask_predictor = mask_predictor_kernel.apply
 
 @pytest.mark.skip
-def torch_predictor(q, k, w, topk):
+def torch_predictor(q, k, w, w2, topk):
     BATCH, N_HEADS, N_CTX, HEAD_DIM = q.shape
     K_HEADS = k.shape[1]
     HIDDEN_DIM = w.shape[-1]
@@ -244,14 +245,15 @@ def torch_predictor(q, k, w, topk):
     k = k.transpose(-1, -2).reshape(BATCH, K_HEADS, -1, HIDDEN_DIM)
 
     p = torch.matmul(q, w)
+    p = torch.matmul(p, w2)
     k = k[:, :, None, :, :].expand(BATCH, K_HEADS, N_HEADS // K_HEADS, N_CTX // 64, HIDDEN_DIM).reshape(BATCH, N_HEADS, N_CTX // 64, HIDDEN_DIM)
     o = torch.matmul(p, k.transpose(-1, -2))
 
     M = torch.tril(torch.ones((N_CTX // 64, N_CTX // 64), device="cuda"))
     o[:, :, M == 0] = float("-inf")
-    nnz_id = torch.topk(o, topk, dim=-1).indices
+    # nnz_id = torch.topk(o, topk, dim=-1).indices
 
-    return nnz_id
+    return o
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM", [(4, 32, 16384, 128, 256)])
 def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
@@ -285,7 +287,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, HIDDEN_DIM, dtype=torch.float16):
 
 
 
-BATCH, N_HEADS, HEAD_DIM, HIDDEN_DIM= 4, 32, 128, 256
+BATCH, N_HEADS, HEAD_DIM, HIDDEN_DIM= 1, 32, 128, 256
 N_CTX = 32768
 # vary seq length for fixed head and batch=4
 configs = []
@@ -293,7 +295,7 @@ for mode in ["fwd"]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["topk"],
-            x_vals=[i for i in range(0, 141, 5)],
+            x_vals=[i for i in range(0, 50, 5)],
             line_arg="provider",
             line_vals=["triton-fp16"] + ["torch-fp16"],
             line_names=["Triton-fp16"] + ["Torch-fp16"],
@@ -321,13 +323,15 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, HIDDEN_DIM, topk, mode, pro
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H // 4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         w = torch.randn((H, HEAD_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
-        fn = lambda: triton_mask_predictor(q, k, w, topk)
+        w2 = torch.randn((H, HIDDEN_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
+        fn = lambda: triton_mask_predictor(q, k, w, w2, topk)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if "torch" in provider:
         q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         k = torch.randn((BATCH, H // 4, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
         w = torch.randn((H, HEAD_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
-        fn = lambda: torch_predictor(q, k, w, topk)
+        w2 = torch.randn((H, HIDDEN_DIM, HIDDEN_DIM), dtype=dtype, device="cuda")
+        fn = lambda: torch_predictor(q, k, w, w2, topk)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     return ms
 
